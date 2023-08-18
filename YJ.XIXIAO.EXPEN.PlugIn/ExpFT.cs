@@ -71,7 +71,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 		public override void PreOpenForm(PreOpenFormEventArgs e)
 		{
 			((AbstractDynamicFormPlugIn)this).PreOpenForm(e);
-			LicenseVerifier.CheckViewOnlyOperation(this.Context, ResManager.LoadKDString("计提折旧", "003268000005860", (SubSystemType)4, new object[0]));
+			//LicenseVerifier.CheckViewOnlyOperation(this.Context, ResManager.LoadKDString("计提折旧", "003268000005860", (SubSystemType)4, new object[0]));
 		}
 
 		public override void AfterBindData(EventArgs e)

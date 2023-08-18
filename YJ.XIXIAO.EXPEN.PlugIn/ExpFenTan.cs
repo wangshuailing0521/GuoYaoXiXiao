@@ -9,10 +9,13 @@ using Kingdee.BOS.Core.DynamicForm.PlugIn.WizardForm;
 using Kingdee.BOS.Core.Metadata;
 using Kingdee.BOS.Core.Metadata.FieldElement;
 using Kingdee.BOS.Core.Metadata.FormElement;
+using Kingdee.BOS.Log;
 using Kingdee.BOS.Orm;
 using Kingdee.BOS.Orm.DataEntity;
 using Kingdee.BOS.ServiceHelper;
 using Kingdee.BOS.Util;
+
+using Newtonsoft.Json;
 
 using System;
 using System.Collections.Generic;
@@ -87,6 +90,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 }
                 catch (Exception ex)
                 {
+                    Logger.Error("", ex.Message, ex);
                     shareResultList.Add(new ShareResult { Org = fTOrg, Status = "失败", Message = ex.Message });
                 }
                
@@ -113,6 +117,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 }
                 catch (Exception ex)
                 {
+                    Logger.Error("", ex.Message, ex);
                     shareResultList.Add(new ShareResult { Org = fTOrg, Status = "失败", Message = ex.Message });
                 }
 
@@ -330,7 +335,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 		                INNER JOIN T_BD_MATERIAL BM WITH(NOLOCK)
 						ON B.FMATERIALID = BM.FMATERIALID
 						INNER JOIN T_BD_MATERIALGROUP BMG WITH(NOLOCK)
-						ON BM.FMATERIALGROUP = BMG.FGROUPID
+						ON BM.FMATERIALGROUP = BMG.FID
 		                INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
 		                ON A.FDeptId = C.FDEPTID
 		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
@@ -361,6 +366,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 expInfos.Add(expInfo);
             }
 
+            if (expInfos.Count <= 0)
+            {
+                throw new Exception($"获取费用项目【ZZ1001/ZZ1002/ZZ1003/ZZ2301/ZZ0901】时报错：未找到费用项目！");
+            }
+
             foreach (var item in data)
             {
                 Cost cost = new Cost();
@@ -376,6 +386,10 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 if (billType.Equals("QTCKD05"))
                 {
                     ExpInfo expInfo = expInfos.Where(x => x.ExpNumber.Equals("ZZ0901")).FirstOrDefault();
+                    if (expInfo == null)
+                    {
+                        throw new Exception($"获取其他出库单据类型【QTCKD05】对应的费用项目【ZZ0901】时报错：未找到费用项目！");
+                    }
                     cost.ExpID = expInfo.ExpID;
                     cost.ExpNo = expInfo.ExpNumber;
                 }
@@ -385,6 +399,10 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     if (materialGroup.Equals("01010601") || materialGroup.Equals("01010603"))
                     {
                         ExpInfo expInfo = expInfos.Where(x => x.ExpNumber.Equals("ZZ1003")).FirstOrDefault();
+                        if (expInfo == null)
+                        {
+                            throw new Exception($"获取其他出库物料分组【01010601/01010603】对应的费用项目【ZZ1003】时报错：未找到费用项目！");
+                        }
                         cost.ExpID = expInfo.ExpID;
                         cost.ExpNo = expInfo.ExpNumber;
                     }
@@ -392,6 +410,10 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     if (materialGroup.Equals("01010602") || materialGroup.Equals("01010604"))
                     {
                         ExpInfo expInfo = expInfos.Where(x => x.ExpNumber.Equals("ZZ1002")).FirstOrDefault();
+                        if (expInfo == null)
+                        {
+                            throw new Exception($"获取其他出库物料分组【01010602/01010604】对应的费用项目【ZZ1002】时报错：未找到费用项目！");
+                        }
                         cost.ExpID = expInfo.ExpID;
                         cost.ExpNo = expInfo.ExpNumber;
                     }
@@ -400,6 +422,10 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     if (materialGroup.Equals("01010801") || materialGroup.Equals("01010803") || materialGroup.Equals("01010804"))
                     {
                         ExpInfo expInfo = expInfos.Where(x => x.ExpNumber.Equals("ZZ2301")).FirstOrDefault();
+                        if (expInfo == null)
+                        {
+                            throw new Exception($"获取其他出库物料分组【01010801/01010803/01010804】对应的费用项目【ZZ2301】时报错：未找到费用项目！");
+                        }
                         cost.ExpID = expInfo.ExpID;
                         cost.ExpNo = expInfo.ExpNumber;
                     }
@@ -407,11 +433,19 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     if (materialGroup.Equals("01010802"))
                     {
                         ExpInfo expInfo = expInfos.Where(x => x.ExpNumber.Equals("ZZ1001")).FirstOrDefault();
+                        if (expInfo == null)
+                        {
+                            throw new Exception($"获取其他出库物料分组【01010802】对应的费用项目时【ZZ1001】报错：未找到费用项目！");
+                        }
                         cost.ExpID = expInfo.ExpID;
                         cost.ExpNo = expInfo.ExpNumber;
                     }
                 }
 
+                if (cost.ExpID == null)
+                {
+                    throw new Exception($"制造费用分摊不包含【{materialGroup}】分组物料，请核对！");
+                }
 
                 cost.Amount = Convert.ToDecimal(item["FAmount"]);
                 deptCostList.Add(cost);
@@ -793,6 +827,8 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
             foreach (var cost in costList.Where(x => x.OrgId == fTOrg.OrgId))
             {
+                //Logger.Error("",JsonConvert.SerializeObject(cost),null);
+
                 List<CustNum> custNums = new List<CustNum>();
                 //制造部门
                 if (cost.DeptType == "DP05_SYS")
