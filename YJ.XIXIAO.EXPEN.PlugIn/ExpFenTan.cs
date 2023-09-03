@@ -29,7 +29,6 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
     [HotUpdate]
     public class ExpFenTan: AbstractWizardFormPlugIn
     {
-        List<string> expList = new List<string>();
         List<FTOrg> fTOrgList = new List<FTOrg>();
         List<FTOrg> difOrgList = new List<FTOrg>();
         List<Cost> deptCostList = new List<Cost>();
@@ -122,14 +121,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 }
 
             }
-            //GetDifShareData()
         }
 
         #region 费用分摊
         private void ExpFT(FTOrg fTOrg)
         {
-            //获取费用项目
-            GetExpId(fTOrg);
             //获取总成本
             GetSumCost(fTOrg);
             //获取数量
@@ -139,43 +135,88 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             //创建成本分摊单
             CreateCostShare(fTOrg);
         }
+        #endregion
 
-        /// <summary>
-        /// 动态获取费用科目：获取对应期间且部门为生产部门的计提单上的所有费用项目
-        /// </summary>
-        /// <param name="fTOrg"></param>
-        private List<string> GetExpId(FTOrg fTOrg)
+        #region 差额分摊
+        private void DifFT(FTOrg fTOrg)
         {
-            expList.Clear();
+            string billType = "CBFT2";
 
-            string sql = $@"
-                SELECT  DISTINCT B.FExpID
-                  FROM  t_ER_ExpenseJt A WITH(NOLOCK)
-		                INNER JOIN t_ER_ExpenseJtEntry B WITH(NOLOCK)
-		                ON A.FID = B.FID
-		                INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK)
-		                ON B.FExpenseDeptEntryID = C.FDEPTID
-		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK)
-		                ON C.FDeptProperty = D.FENTRYID 
-                 WHERE  A.FDOCUMENTSTATUS = 'C'
-                   AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
-                   AND  A.FDate >= '{fTOrg.BeginTime}'
-                   AND  A.FDate < '{fTOrg.EndTime}'
-                   AND  A.FExpenseOrgId = {fTOrg.OrgId}
-                ";
-            DynamicObjectCollection data
-                = DBUtils.ExecuteDynamicObject(this.Context, sql);
-            expList = data.Select(x => x["FExpID"].ToString()).ToList();
-            if (expList == null)
+            //获取需要计提的差额期间
+            GetDifOrg(fTOrg);
+
+            foreach (var difOrg in difOrgList)
             {
-                expList = new List<string>();
+                //获取总差额
+                deptCostList.Clear();
+                costList.Clear();
+                GetDifShareData(difOrg);
+
+                //获取数量
+                custNumList.Clear();
+                GetNum(difOrg,true);
+
+                //总成本分摊到客户产品
+                FTDetailCost(difOrg);
+                //创建成本分摊单
+                CreateCostShare(difOrg, billType);
+            }  
+        }
+        void GetDifOrg(FTOrg fTOrg)
+        {
+            deptCostList.Clear();
+            costList.Clear();
+            difOrgList.Clear();
+            DynamicObjectCollection data = null;
+            string sql = $@"
+                SELECT  DISTINCT YEAR(A.FJTDate) FYEAR,MONTH(A.FJTDate) FPeriod
+                  FROM  t_ER_ExpenseReimb A
+                        INNER JOIN t_ER_ExpenseReimbEntry B
+                        ON A.FID = B.FID
+                        INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+	                    ON B.FExpenseDeptEntryID = C.FDEPTID
+		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+		                ON C.FDeptProperty = D.FENTRYID 
+                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
+                        ON C.FDEPTID = E.FRELATION
+                 WHERE  A.FDate >= '{fTOrg.BeginTime}'
+                   AND  A.FDate < '{fTOrg.EndTime}'
+                   AND  A.FDocumentStatus = 'C'
+                   AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
+                   AND  A.FOrgID = {fTOrg.OrgId}
+                   AND  YEAR(A.FJTDate) <> 0
+                ";
+
+            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
+
+            foreach (var item in data)
+            {
+                FTOrg difOrg = new FTOrg();
+
+                difOrg.OrgId = fTOrg.OrgId;
+                difOrg.AcctPolicy = fTOrg.AcctPolicy;
+                difOrg.Year = fTOrg.Year;
+                difOrg.Period = fTOrg.Period;
+
+                difOrg.BeginTime = fTOrg.BeginTime;
+                difOrg.EndTime = fTOrg.EndTime;
+
+                difOrg.JTYear = item["FYEAR"].ToString();
+                difOrg.JTPeriod = item["FPeriod"].ToString();
+                difOrg.JTBeginTime = $@"{difOrg.JTYear}-{difOrg.JTPeriod}-01";
+                difOrg.JTEndTime = Convert.ToDateTime(difOrg.JTBeginTime).AddMonths(1).ToString("yyyy-MM-dd");
+                difOrgList.Add(difOrg);
             }
 
-            expList.Add("113776");//化料成本
-            expList.Add("113777");//辅料成本
-
-            return expList.Distinct().ToList();
+            
+            if (difOrgList.Count <= 0)
+            {
+                throw new Exception("未获取到对应期间的总成本!");
+            }
         }
+
+       
+        #endregion
 
         private void GetSumCost(FTOrg fTOrg)
         {
@@ -196,134 +237,12 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             string sql = "";
             DynamicObjectCollection data = null;
 
-            #region 1.获取财务应付的金额
-            //sql = $@"
-            //    SELECT  BLH.FSETTLEORGID FOrgID
-            //           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-            //           ,BL.FCOSTID FExpID
-            //           ,ISNULL(E.FCostCenterID,0) FCostCenterID
-            //           ,SUM(BL.FALLAMOUNTFOR)FAmount
-            //           ,C.FDEPTID
-            //      FROM  T_AP_PAYABLE A WITH(NOLOCK)
-            //      INNER JOIN T_AP_PAYABLEENTRY B WITH(NOLOCK)
-            //      ON A.FID = B.FID
-            //            LEFT JOIN T_AP_PAYABLE_LK BEL WITH(NOLOCK)
-            //            ON BEL.FSID = B.FENTRYID AND BEL.FSBILLID = B.FID
-            //            LEFT JOIN T_AP_PAYABLEENTRY BL WITH(NOLOCK)
-            //            ON BEL.FENTRYID = BL.FENTRYID
-            //            LEFT JOIN T_AP_PAYABLE BLH WITH(NOLOCK)
-            //            ON BL.FID = BLH.FID
-            //      INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-            //      ON BLH.FPURCHASEDEPTID = C.FDEPTID
-            //      INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-            //      ON C.FDeptProperty = D.FENTRYID 
-            //            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-            //            ON C.FDEPTID = E.FRELATION
-            //     WHERE  BLH.FDOCUMENTSTATUS = 'C'
-            //       AND  D.FNUMBER = 'DP01_SYS' --生产部门 
-            //       AND  BLH.FDate >= '{fTOrg.BeginTime}'
-            //       AND  BLH.FDate < '{fTOrg.EndTime}'
-            //       AND  BLH.FSETTLEORGID = {fTOrg.OrgId}
-            //       AND  A.FSetAccountType = 2 --暂估应付
-            //       AND  BLH.FSetAccountType = 3 --财务应付
-            //       AND  BL.FCOSTID IN (111685,111686) --化料成本，辅料成本
-            //     GROUP  BY BLH.FSETTLEORGID,C.F_ora_Assistant,C.FDEPTID,BL.FCOSTID,E.FCostCenterID --专用车间,费用项目
-            //    ";
-            //data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-            //foreach (var item in data)
-            //{
-            //    Cost cost = new Cost();
-            //    cost.OrgId = item["FOrgID"].ToString();
-            //    cost.CostCenterId = item["FCostCenterID"].ToString();
-            //    cost.IsZY = item["FZYDept"].ToString();
-            //    cost.DeptID = item["FDEPTID"].ToString();
-            //    cost.ExpID = item["FExpID"].ToString();
-            //    cost.Amount = Convert.ToDecimal(item["FAmount"]);
-            //    deptCostList.Add(cost);
-            //}
-            #endregion
-
-            #region 2.获取暂估应付的金额
-            //sql = $@"
-            //    SELECT  A.FSETTLEORGID FOrgID
-            //           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-            //           ,B.FCOSTID FExpID
-            //           ,ISNULL(E.FCostCenterID,0) FCostCenterID
-            //           ,SUM(B.FALLAMOUNTFOR)FAmount
-            //           ,C.FDEPTID
-            //      FROM  T_AP_PAYABLE A WITH(NOLOCK)
-            //      INNER JOIN T_AP_PAYABLEENTRY B WITH(NOLOCK)
-            //      ON A.FID = B.FID
-            //            LEFT JOIN T_AP_PAYABLE_LK BEL WITH(NOLOCK)
-            //            ON BEL.FSID = B.FENTRYID AND BEL.FSBILLID = B.FID
-            //      INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-            //      ON A.FPURCHASEDEPTID = C.FDEPTID
-            //      INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-            //      ON C.FDeptProperty = D.FENTRYID 
-            //            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-            //            ON C.FDEPTID = E.FRELATION
-            //     WHERE  A.FDOCUMENTSTATUS = 'C'
-            //       AND  D.FNUMBER = 'DP01_SYS' --生产部门 
-            //       AND  A.FDate >= '{fTOrg.BeginTime}'
-            //       AND  A.FDate < '{fTOrg.EndTime}'
-            //       AND  A.FSETTLEORGID = {fTOrg.OrgId}
-            //       AND  A.FSetAccountType = 2 --暂估应付
-            //       AND  BEL.FSID IS NULL
-            //       AND  A.FBillNo NOT LIKE '%-%'
-            //       AND  B.FCOSTID IN (111685,111686) --化料成本，辅料成本
-            //     GROUP  BY A.FSETTLEORGID,C.F_ora_Assistant,C.FDEPTID,B.FCOSTID,E.FCostCenterID --专用车间,费用项目
-            //    ";
-            //data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-            //foreach (var item in data)
-            //{
-            //    Cost cost = new Cost();
-            //    cost.OrgId = item["FOrgID"].ToString();
-            //    cost.CostCenterId = item["FCostCenterID"].ToString();
-            //    cost.IsZY = item["FZYDept"].ToString();
-            //    cost.DeptID = item["FDEPTID"].ToString();
-            //    cost.ExpID = item["FExpID"].ToString();
-            //    cost.Amount = Convert.ToDecimal(item["FAmount"]);
-            //    deptCostList.Add(cost);
-            //}
-            #endregion
-
             #region 1.获取其他出库的金额
-            //sql = $@"
-            //    SELECT  A.FStockOrgId FOrgID
-            //           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-            //           ,B.FExpID FExpID
-            //           ,BE.FNumber FExpNo
-            //           ,ISNULL(E.FCostCenterID,0) FCostCenterID
-            //           ,SUM(B.FAmount)FAmount
-            //           ,C.FDEPTID
-            //           ,D.FNUMBER FDeptType
-            //      FROM  T_STK_MISDELIVERY A WITH(NOLOCK)
-            //      INNER JOIN T_STK_MISDELIVERYENTRY B WITH(NOLOCK)
-            //      ON A.FID = B.FID
-            //      INNER JOIN T_BD_Expense BE WITH(NOLOCK)
-            //      ON B.FExpID = BE.FExpID
-            //      INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-            //      ON A.FDeptId = C.FDEPTID
-            //      INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-            //      ON C.FDeptProperty = D.FENTRYID 
-            //            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-            //            ON C.FDEPTID = E.FRELATION
-            //     WHERE  A.FDOCUMENTSTATUS = 'C'
-            //       AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
-            //       AND  A.FDate >= '{fTOrg.BeginTime}'
-            //       AND  A.FDate < '{fTOrg.EndTime}'
-            //       AND  A.FStockOrgId = {fTOrg.OrgId}
-            //       AND  BE.FNumber IN ('ZZ1001','ZZ1002') --化料成本，辅料成本
-            //     GROUP  BY A.FStockOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,E.FCostCenterID,BE.FNumber,D.FNUMBER --专用车间,费用项目
-            //    ";
             sql = $@"
                 SELECT  A.FStockOrgId FOrgID
                        ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
                        ,AT.FNUMBER FBillType
                        ,BMG.FNUMBER FMaterialGroup
-                       ,ISNULL(E.FCostCenterID,0) FCostCenterID
                        ,SUM(B.FAmount)FAmount
                        ,C.FDEPTID
                        ,D.FNUMBER FDeptType
@@ -340,14 +259,12 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 		                ON A.FDeptId = C.FDEPTID
 		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
 		                ON C.FDeptProperty = D.FENTRYID 
-                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                        ON C.FDEPTID = E.FRELATION
                  WHERE  A.FDOCUMENTSTATUS = 'C'
                    AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
                    AND  A.FDate >= '{fTOrg.BeginTime}'
                    AND  A.FDate < '{fTOrg.EndTime}'
                    AND  A.FStockOrgId = {fTOrg.OrgId}
-                 GROUP  BY A.FStockOrgId,C.F_ora_Assistant,C.FDEPTID,AT.FNUMBER,E.FCostCenterID,BMG.FNUMBER,D.FNUMBER --专用车间,费用项目
+                 GROUP  BY A.FStockOrgId,C.F_ora_Assistant,C.FDEPTID,AT.FNUMBER,BMG.FNUMBER,D.FNUMBER --专用车间,费用项目
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -375,7 +292,6 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             {
                 Cost cost = new Cost();
                 cost.OrgId = item["FOrgID"].ToString();
-                cost.CostCenterId = item["FCostCenterID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
                 cost.DeptType = item["FDeptType"].ToString();
@@ -458,11 +374,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
                        ,BD.FCostItemID FExpID
                        ,BE.FNumber FExpNo
-                       ,ISNULL(E.FCostCenterID,0) FCostCenterID
                        ,SUM(BD.FAllocValue)FAmount
                        ,C.FDEPTID
                        ,D.FNUMBER FDeptType
                        ,BD.F_PDLJ_Base FCustByDept
+                       ,ISNULL(DPG.FNUMBER,'') FExpGroup
                   FROM  T_FA_DEPRADJUST A WITH(NOLOCK)
 		                INNER JOIN T_FA_DEPRADJUSTENTRY B WITH(NOLOCK)
 		                ON A.FID = B.FID
@@ -474,15 +390,15 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 		                ON BD.FUseDeptID = C.FDEPTID
 		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
 		                ON C.FDeptProperty = D.FENTRYID 
-                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                        ON C.FDEPTID = E.FRELATION
+                        LEFT JOIN T_BD_EXPENSE_GROUP DPG WITH(NOLOCK)
+                        ON BE.FGROUP = DPG.FID
                  WHERE  A.FDOCUMENTSTATUS = 'C'
                    AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
                    AND  A.FTransDate >= '{fTOrg.BeginTime}'
                    AND  A.FTransDate < '{fTOrg.EndTime}'
                    AND  A.FOWNERORGID = {fTOrg.OrgId}
                    --AND  BE.FNumber IN ('FYXM08_SYS') --折旧费用
-                 GROUP  BY A.FOWNERORGID,C.F_ora_Assistant,C.FDEPTID,BD.FCostItemID,E.FCostCenterID,BE.FNumber,D.FNUMBER,BD.F_PDLJ_Base --专用车间,费用项目
+                 GROUP  BY A.FOWNERORGID,C.F_ora_Assistant,C.FDEPTID,BD.FCostItemID,BE.FNumber,D.FNUMBER,BD.F_PDLJ_Base,DPG.FNUMBER --专用车间,费用项目
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -490,13 +406,13 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             {
                 Cost cost = new Cost();
                 cost.OrgId = item["FOrgID"].ToString();
-                cost.CostCenterId = item["FCostCenterID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
                 cost.DeptType = item["FDeptType"].ToString();
                 cost.CustByDept = item["FCustByDept"].ToString();
                 cost.ExpID = item["FExpID"].ToString();
                 cost.ExpNo = item["FExpNo"].ToString();
+                cost.ExpGroup = item["FExpGroup"].ToString();
                 cost.Amount = Convert.ToDecimal(item["FAmount"]);
                 deptCostList.Add(cost);
             }
@@ -508,11 +424,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
                        ,B.FExpID
                        ,BE.FNumber FExpNo
-                       ,ISNULL(E.FCostCenterID,0) FCostCenterID
-                       ,SUM(B.FExpenseAmount)FAmount
+                       ,SUM(B.FTaxSubmitAmt)FAmount
                        ,C.FDEPTID
                        ,D.FNUMBER FDeptType
                        ,B.F_PDLJ_Base FCustByDept
+                       ,ISNULL(DPG.FNUMBER,'') FExpGroup
+                       ,A.FContactUnitType
+                       ,A.FContactUnit
+                       ,B.F_ora_Base FProgramID
                   FROM  t_ER_ExpenseJt A WITH(NOLOCK)
 		                INNER JOIN t_ER_ExpenseJtEntry B WITH(NOLOCK)
 		                ON A.FID = B.FID
@@ -522,17 +441,16 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 		                ON B.FExpenseDeptEntryID = C.FDEPTID
 		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
 		                ON C.FDeptProperty = D.FENTRYID 
-                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                        ON C.FDEPTID = E.FRELATION
+                        LEFT JOIN T_BD_EXPENSE_GROUP DPG WITH(NOLOCK)
+                        ON BE.FGROUP = DPG.FID
                  WHERE  A.FDOCUMENTSTATUS = 'C'
                    AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门  
                    AND  A.FDate >= '{fTOrg.BeginTime}'
                    AND  A.FDate < '{fTOrg.EndTime}'
                    AND  A.FExpenseOrgId = {fTOrg.OrgId}
                    AND  ISNULL(A.FBXBillNo,'') = '' --未下推费用报销单
-                   AND  BE.FNumber NOT IN ('ZZ1001','ZZ1002') --非化料成本，辅料成本
                    AND  A.FBillNo NOT LIKE '%-%'
-                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,E.FCostCenterID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base --专用车间,费用项目
+                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,,B.F_ora_Base
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -540,13 +458,16 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             {
                 Cost cost = new Cost();
                 cost.OrgId = item["FOrgID"].ToString();
-                cost.CostCenterId = item["FCostCenterID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
                 cost.DeptType = item["FDeptType"].ToString();
                 cost.CustByDept = item["FCustByDept"].ToString();
                 cost.ExpID = item["FExpID"].ToString();
                 cost.ExpNo = item["FExpNo"].ToString();
+                cost.ContactUnitType = item["FContactUnitType"].ToString();
+                cost.ContactUnit = item["FContactUnit"].ToString();
+                cost.ExpGroup = item["FExpGroup"].ToString();
+                cost.ProgramID = item["FProgramID"].ToString();
                 cost.Amount = Convert.ToDecimal(item["FAmount"]);
                 deptCostList.Add(cost);
             }
@@ -554,34 +475,39 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
             #region 5.获取费用报销单的金额
             sql = $@"
-                SELECT  A.FOrgID FOrgID
-                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-                       ,B.FExpID
-                       ,BE.FNumber FExpNo
-                       ,ISNULL(E.FCostCenterID,0) FCostCenterID
-                       ,SUM(B.FExpenseAmount)FAmount
-                       ,C.FDEPTID
-                       ,D.FNUMBER FDeptType
-                       ,B.F_PDLJ_Base FCustByDept
-                  FROM  T_ER_EXPENSEREIMB A WITH(NOLOCK)
-						INNER JOIN T_ER_EXPENSEREIMBENTRY B WITH(NOLOCK)
-						ON A.FID = B.FID 
-		                INNER JOIN T_BD_Expense BE WITH(NOLOCK)
-		                ON B.FExpID = BE.FExpID
-		                INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-		                ON B.FExpenseDeptEntryID = C.FDEPTID
-		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		                ON C.FDeptProperty = D.FENTRYID 
-                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                        ON C.FDEPTID = E.FRELATION
-                 WHERE  A.FDOCUMENTSTATUS = 'C'
-                   AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
-                   AND  A.FDate >= '{fTOrg.BeginTime}'
-                   AND  A.FDate < '{fTOrg.EndTime}'
-                   AND  A.FOrgID = {fTOrg.OrgId}
-                   AND  A.FJTDate IS NULL --计提日期为空
-                   AND  BE.FNumber NOT IN ('ZZ1001','ZZ1002') --非化料成本，辅料成本
-                 GROUP  BY A.FOrgID,C.F_ora_Assistant,C.FDEPTID,B.FExpID,E.FCostCenterID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base --专用车间,费用项目
+                SELECT FOrgID,FZYDept,FExpID,FExpNo,FDEPTID,FDeptType,FCustByDept,FExpGroup,FContactUnitType,FContactUnit,FProgramID,SUM(FAmount)FAmount
+                  FROM  (
+                    SELECT  A.FOrgID FOrgID
+                           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
+                           ,B.FExpID
+                           ,BE.FNumber FExpNo
+                           ,CASE WHEN B.FInvoiceType = '0' THEN B.FExpenseAmount ELSE B.FTaxSubmitAmt END FAmount
+                           ,C.FDEPTID
+                           ,D.FNUMBER FDeptType
+                           ,B.F_PDLJ_Base FCustByDept
+                           ,ISNULL(DPG.FNUMBER,'') FExpGroup
+                           ,A.FContactUnitType
+                           ,A.FContactUnit
+                           ,B.F_ora_Base FProgramID
+                      FROM  T_ER_EXPENSEREIMB A WITH(NOLOCK)
+						    INNER JOIN T_ER_EXPENSEREIMBENTRY B WITH(NOLOCK)
+						    ON A.FID = B.FID 
+		                    INNER JOIN T_BD_Expense BE WITH(NOLOCK)
+		                    ON B.FExpID = BE.FExpID
+		                    INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+		                    ON B.FExpenseDeptEntryID = C.FDEPTID
+		                    INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+		                    ON C.FDeptProperty = D.FENTRYID 
+                            LEFT JOIN T_BD_EXPENSE_GROUP DPG WITH(NOLOCK)
+                            ON BE.FGROUP = DPG.FID
+                     WHERE  A.FDOCUMENTSTATUS = 'C'
+                       AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
+                       AND  A.FDate >= '{fTOrg.BeginTime}'
+                       AND  A.FDate < '{fTOrg.EndTime}'
+                       AND  A.FOrgID = {fTOrg.OrgId}
+                       AND  (A.FJTDate IS NULL OR (A.FJTDate IS NOT NULL AND YEAR(A.FDate) = YEAR(A.FJTDate) AND MONTH(A.FDate) = MONTH(A.FJTDate)))--计提日期为空
+                   ) A                 
+                GROUP  BY FOrgID,FZYDept,FExpID,FExpNo,FDEPTID,FDeptType,FCustByDept,FExpGroup,FContactUnitType,FContactUnit,FProgramID
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -589,13 +515,16 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             {
                 Cost cost = new Cost();
                 cost.OrgId = item["FOrgID"].ToString();
-                cost.CostCenterId = item["FCostCenterID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
                 cost.DeptType = item["FDeptType"].ToString();
                 cost.CustByDept = item["FCustByDept"].ToString();
                 cost.ExpID = item["FExpID"].ToString();
                 cost.ExpNo = item["FExpNo"].ToString();
+                cost.ContactUnitType = item["FContactUnitType"].ToString();
+                cost.ContactUnit = item["FContactUnit"].ToString();
+                cost.ExpGroup = item["FExpGroup"].ToString();
+                cost.ProgramID = item["FProgramID"].ToString();
                 cost.Amount = Convert.ToDecimal(item["FAmount"]);
                 deptCostList.Add(cost);
             }
@@ -604,11 +533,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             foreach (var deptCost in deptCostList)
             {
                 Cost cost = costList.Where(x => x.OrgId == deptCost.OrgId
-                                             && x.CostCenterId == deptCost.CostCenterId
                                              && x.IsZY == deptCost.IsZY
                                              && x.ExpID == deptCost.ExpID
                                              && x.DeptType == deptCost.DeptType
                                              && x.CustByDept == deptCost.CustByDept
+                                             && x.ExpGroup == deptCost.ExpGroup
+                                             && x.ContactUnitType == deptCost.ContactUnitType
+                                             && x.ContactUnit == deptCost.ContactUnit
+                                             && x.ProgramID == deptCost.ProgramID
                 ).FirstOrDefault();
 
                 if (cost == null)
@@ -616,12 +548,15 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     costList.Add(new Cost()
                     {
                         OrgId = deptCost.OrgId,
-                        CostCenterId = deptCost.CostCenterId,
                         IsZY = deptCost.IsZY,
                         ExpID = deptCost.ExpID,
                         ExpNo = deptCost.ExpNo,
                         DeptType = deptCost.DeptType,
                         CustByDept = deptCost.CustByDept,
+                        ExpGroup = deptCost.ExpGroup,
+                        ContactUnitType = deptCost.ContactUnitType,
+                        ContactUnit = deptCost.ContactUnit,
+                        ProgramID = deptCost.ProgramID,
                         Amount = deptCost.Amount
                     });
                 }
@@ -638,7 +573,182 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
         }
 
-        private void GetNum(FTOrg fTOrg)
+        private void GetDifShareData(FTOrg fTOrg)
+        {
+            DynamicObjectCollection data = null;
+            string sql = "";
+
+            #region 1.获取费用报销单计提日期不为空的差额
+            sql = $@"
+                SELECT  A.FOrgID FOrgID
+                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
+                       ,B.FExpID
+                       ,BE.FNumber FExpNo
+                       ,SUM(B.FDifAmount) FAmount
+                       ,C.FDEPTID
+                       ,D.FNUMBER FDeptType
+                       ,B.F_PDLJ_Base FCustByDept
+                       ,ISNULL(DPG.FNUMBER,'') FExpGroup
+                       ,A.FContactUnitType
+                       ,A.FContactUnit
+                       ,B.F_ora_Base FProgramID
+                  FROM  t_ER_ExpenseReimb A WITH(NOLOCK)
+                        INNER JOIN t_ER_ExpenseReimbEntry B WITH(NOLOCK)
+                        ON A.FID = B.FID
+		                INNER JOIN T_BD_Expense BE WITH(NOLOCK)
+		                ON B.FExpID = BE.FExpID
+                        INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+	                    ON B.FExpenseDeptEntryID = C.FDEPTID
+		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+		                ON C.FDeptProperty = D.FENTRYID 
+                        LEFT JOIN T_BD_EXPENSE_GROUP DPG WITH(NOLOCK)
+                        ON BE.FGROUP = DPG.FID
+                 WHERE  A.FJTDate >= '{fTOrg.JTBeginTime}'
+                   AND  A.FJTDate < '{fTOrg.JTEndTime}'
+                   AND  A.FDocumentStatus = 'C'
+                   AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
+                   AND  A.FOrgID = {fTOrg.OrgId}
+                   AND  B.FDifAmount <> 0
+                 GROUP  BY A.FOrgID,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base 
+                ";
+
+            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
+
+            foreach (var item in data)
+            {
+                Cost cost = new Cost();
+                cost.OrgId = item["FOrgID"].ToString();
+                cost.IsZY = item["FZYDept"].ToString();
+                cost.DeptID = item["FDEPTID"].ToString();
+                cost.DeptType = item["FDeptType"].ToString();
+                cost.CustByDept = item["FCustByDept"].ToString();
+                cost.ExpID = item["FExpID"].ToString();
+                cost.ExpNo = item["FExpNo"].ToString();
+                cost.ExpGroup = item["FExpGroup"].ToString();
+                cost.ContactUnitType = item["FContactUnitType"].ToString();
+                cost.ContactUnit = item["FContactUnit"].ToString();
+                cost.ProgramID = item["FProgramID"].ToString();
+                cost.Amount = Convert.ToDecimal(item["FAmount"]);
+                deptCostList.Add(cost);
+            }
+            #endregion
+
+            #region 2.费用计提有报销单号但报销单中没有对应费用项目的，取费用计提单对应费用项目的负数费用金额
+            sql = $@"
+                SELECT  A.FExpenseOrgId FOrgID
+                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
+                       ,B.FExpID
+                       ,BE.FNumber FExpNo
+                       ,SUM(0 - B.FTaxSubmitAmt)FAmount
+                       ,C.FDEPTID
+                       ,D.FNUMBER FDeptType
+                       ,B.F_PDLJ_Base FCustByDept
+                       ,ISNULL(DPG.FNUMBER,'') FExpGroup
+                       ,A.FContactUnitType
+                       ,A.FContactUnit
+                       ,B.F_ora_Base FProgramID
+                  FROM  t_ER_ExpenseJt A WITH(NOLOCK)
+		                INNER JOIN t_ER_ExpenseJtEntry B WITH(NOLOCK)
+		                ON A.FID = B.FID
+                        LEFT JOIN  (SELECT A.FBillNo,B.FExpID
+                                      FROM t_ER_ExpenseReimb A WITH(NOLOCK)
+                                           INNER JOIN t_ER_ExpenseReimbEntry B WITH(NOLOCK)
+                                           ON A.FID = B.FID
+                                     GROUP BY A.FBillNo,B.FExpID )T1
+                        ON A.FBXBillNo = T1.FBillNo AND B.FExpID = T1.FExpID
+		                INNER JOIN T_BD_Expense BE WITH(NOLOCK)
+		                ON B.FExpID = BE.FExpID
+		                INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+		                ON B.FExpenseDeptEntryID = C.FDEPTID
+		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+		                ON C.FDeptProperty = D.FENTRYID 
+                        LEFT JOIN T_BD_EXPENSE_GROUP DPG WITH(NOLOCK)
+                        ON BE.FGROUP = DPG.FID
+                 WHERE  A.FDOCUMENTSTATUS = 'C'
+                   AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门  
+                   AND  A.FDate >= '{fTOrg.JTBeginTime}'
+                   AND  A.FDate < '{fTOrg.JTEndTime}'
+                   AND  A.FExpenseOrgId = {fTOrg.OrgId}
+                   AND  ISNULL(A.FBXBillNo,'') <> '' --费用报销单号不为空
+                   AND  T1.FExpID IS NULL
+                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base 
+                ";
+            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
+
+            foreach (var item in data)
+            {
+                Cost cost = new Cost();
+                cost.OrgId = item["FOrgID"].ToString();
+                cost.IsZY = item["FZYDept"].ToString();
+                cost.DeptID = item["FDEPTID"].ToString();
+                cost.DeptType = item["FDeptType"].ToString();
+                cost.CustByDept = item["FCustByDept"].ToString();
+                cost.ExpID = item["FExpID"].ToString();
+                cost.ExpNo = item["FExpNo"].ToString();
+                cost.ExpGroup = item["FExpGroup"].ToString();
+                cost.ContactUnitType = item["FContactUnitType"].ToString();
+                cost.ContactUnit = item["FContactUnit"].ToString();
+                cost.ProgramID = item["FProgramID"].ToString();
+                cost.Amount = Convert.ToDecimal(item["FAmount"]);
+                deptCostList.Add(cost);
+            }
+
+            #endregion
+
+            foreach (var deptCost in deptCostList)
+            {
+                Cost cost = costList.Where(x => x.OrgId == deptCost.OrgId
+                                             && x.CostCenterId == deptCost.CostCenterId
+                                             && x.IsZY == deptCost.IsZY
+                                             && x.ExpID == deptCost.ExpID
+                                             && x.DeptType == deptCost.DeptType
+                                             && x.CustByDept == deptCost.CustByDept
+                                             && x.ExpGroup == deptCost.ExpGroup
+                                             && x.ContactUnitType == deptCost.ContactUnitType
+                                             && x.ContactUnit == deptCost.ContactUnit
+                                             && x.ProgramID == deptCost.ProgramID
+                ).FirstOrDefault();
+
+                if (cost == null)
+                {
+                    costList.Add(new Cost()
+                    {
+                        OrgId = deptCost.OrgId,
+                        CostCenterId = deptCost.CostCenterId,
+                        IsZY = deptCost.IsZY,
+                        ExpID = deptCost.ExpID,
+                        ExpNo = deptCost.ExpNo,
+                        DeptType = deptCost.DeptType,
+                        CustByDept = deptCost.CustByDept,
+                        ExpGroup = deptCost.ExpGroup,
+                        ContactUnitType = deptCost.ContactUnitType,
+                        ContactUnit = deptCost.ContactUnit,
+                        ProgramID = deptCost.ProgramID,
+                        Amount = deptCost.Amount
+                    });
+                }
+                else
+                {
+                    cost.Amount = cost.Amount + deptCost.Amount;
+                }
+            }
+
+            if (costList.Count <= 0)
+            {
+                throw new Exception($"未获取到对应期间【{fTOrg.JTYear}-{fTOrg.JTPeriod}】的总成本!");
+            }
+        }
+
+        #region 成本安装数量比例进行分摊
+
+        #endregion
+
+        /// <summary>
+        /// 获取分摊时的数量
+        /// </summary>
+        /// <param name="fTOrg"></param>
+        /// <param name="isDif"></param>
+        private void GetNum(FTOrg fTOrg, bool isDif = false)
         {
 
             custNumList.Clear();
@@ -650,57 +760,57 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             DynamicObjectCollection data = null;
 
             #region 1.从销售订单获取数量
-    //        if (fTOrg.OrgId.Contains("100119"))
-    //        {
-    //            sql = $@"
-				//SELECT FOrgID,FZYDept,FCustID,FCostCenterId,SUM(FWeight)FWeight,SUM(FQTY)FQTY
-				//  FROM  (
-    //                SELECT  A.FSaleOrgId FOrgID
-    //                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-    //                       ,A.FCustID
-    //                       ,B.FMaterialID
-    //                       ,ISNULL(E.FCostCenterId,'')FCostCenterId
-    //                       ,B.F_ora_Qty FWeight
-    //                       ,B.F_ora_Qty1 FQty
-    //                  FROM  T_SAL_ORDER A WITH(NOLOCK)
-		  //                  INNER JOIN T_SAL_ORDEREntry B WITH(NOLOCK)
-		  //                  ON A.FID = B.FID
-		  //                  INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-		  //                  ON A.FSALEDEPTID = C.FDEPTID
-		  //                  INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		  //                  ON C.FDeptProperty = D.FENTRYID 
-    //                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-    //                        ON C.FDEPTID = E.FRELATION
-    //                 WHERE  A.FDOCUMENTSTATUS = 'C'
-    //                   --AND  D.FNUMBER = 'DP01_SYS' --生产部门 
-    //                   AND  A.FDate >= '{fTOrg.BeginTime}'
-    //                   AND  A.FDate < '{fTOrg.EndTime}'
-    //                   AND  A.FSaleOrgId = {fTOrg.OrgId}
-    //                ) A
-    //             GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId
-    //            ";
-    //            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
+            //        if (fTOrg.OrgId.Contains("100119"))
+            //        {
+            //            sql = $@"
+            //SELECT FOrgID,FZYDept,FCustID,FCostCenterId,SUM(FWeight)FWeight,SUM(FQTY)FQTY
+            //  FROM  (
+            //                SELECT  A.FSaleOrgId FOrgID
+            //                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
+            //                       ,A.FCustID
+            //                       ,B.FMaterialID
+            //                       ,ISNULL(E.FCostCenterId,'')FCostCenterId
+            //                       ,B.F_ora_Qty FWeight
+            //                       ,B.F_ora_Qty1 FQty
+            //                  FROM  T_SAL_ORDER A WITH(NOLOCK)
+            //                  INNER JOIN T_SAL_ORDEREntry B WITH(NOLOCK)
+            //                  ON A.FID = B.FID
+            //                  INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+            //                  ON A.FSALEDEPTID = C.FDEPTID
+            //                  INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+            //                  ON C.FDeptProperty = D.FENTRYID 
+            //                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
+            //                        ON C.FDEPTID = E.FRELATION
+            //                 WHERE  A.FDOCUMENTSTATUS = 'C'
+            //                   --AND  D.FNUMBER = 'DP01_SYS' --生产部门 
+            //                   AND  A.FDate >= '{fTOrg.BeginTime}'
+            //                   AND  A.FDate < '{fTOrg.EndTime}'
+            //                   AND  A.FSaleOrgId = {fTOrg.OrgId}
+            //                ) A
+            //             GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId
+            //            ";
+            //            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
-    //            foreach (var item in data)
-    //            {
-    //                CustNum custNum = new CustNum();
-    //                custNum.OrgId = item["FOrgID"].ToString();
-    //                custNum.CostCenterId = item["FCostCenterId"].ToString();
-    //                custNum.CustID = item["FCustID"].ToString();
-    //                //custNum.MaterialID = item["FMaterialID"].ToString();
-    //                custNum.IsZY = item["FZYDept"].ToString();
-    //                custNum.Weight = Convert.ToDecimal(item["FWeight"]);
-    //                custNum.Qty = Convert.ToDecimal(item["FQty"]);
-    //                custNumList.Add(custNum);
-    //            }
-    //        }
+            //            foreach (var item in data)
+            //            {
+            //                CustNum custNum = new CustNum();
+            //                custNum.OrgId = item["FOrgID"].ToString();
+            //                custNum.CostCenterId = item["FCostCenterId"].ToString();
+            //                custNum.CustID = item["FCustID"].ToString();
+            //                //custNum.MaterialID = item["FMaterialID"].ToString();
+            //                custNum.IsZY = item["FZYDept"].ToString();
+            //                custNum.Weight = Convert.ToDecimal(item["FWeight"]);
+            //                custNum.Qty = Convert.ToDecimal(item["FQty"]);
+            //                custNumList.Add(custNum);
+            //            }
+            //        }
             #endregion
 
             #region 1.从暂估应收获取数量
             if (fTOrg.OrgId.Contains("100119"))
             {
                 sql = $@"
-				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,SUM(FWeight)FWeight,SUM(FQTY)FQTY,FDeptType
+				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,SUM(FWeight)FWeight,SUM(FQTY)FQTY,FDeptType,FBusinessBillNo
 				  FROM  (
                     SELECT  A.FSETTLEORGID FOrgID
                            ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
@@ -711,6 +821,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                            ,B.F_ora_Qty FWeight
                            ,B.F_ora_Qty1 FQty
                            ,D.FNumber FDeptType
+                           ,A.FBillNo FBusinessBillNo
                       FROM  T_AR_RECEIVABLE A WITH(NOLOCK)
 		                    INNER JOIN T_AR_RECEIVABLEENTRY B WITH(NOLOCK)
 		                    ON A.FID = B.FID
@@ -732,10 +843,10 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        AND  A.FDate < '{fTOrg.JTEndTime}'
                        AND  A.FSETTLEORGID = {fTOrg.OrgId}
                        AND  A.FSetAccountType = 2 --暂估应收
-                       AND  BEL.FSID IS NULL
+                       --AND  BEL.FSID IS NULL
                        AND  A.FBillNo NOT LIKE '%-%'
                     ) A
-                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,FDeptType
+                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,FDeptType,FBusinessBillNo
                 ";
                 data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -750,6 +861,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     custNum.Weight = Convert.ToDecimal(item["FWeight"]);
                     custNum.Qty = Convert.ToDecimal(item["FQty"]);
                     custNum.DeptType = item["FDeptType"].ToString();
+                    custNum.BusinessBillNo = item["FBusinessBillNo"].ToString();
                     custNumList.Add(custNum);
                 }
             }
@@ -759,7 +871,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             if (!fTOrg.OrgId.Contains("100119"))
             {
                 sql = $@"
-				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,SUM(FWeight)FWeight,SUM(FQTY)FQTY,FDeptType
+				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,SUM(FWeight)FWeight,SUM(FQTY)FQTY,FDeptType,FBusinessBillNo
 				  FROM  (
                     SELECT  A.FOrgID FOrgID
                            ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FNumber ELSE '0' END FZYDept
@@ -770,6 +882,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                            ,B.FWEIGHT FWeight
                            ,B.FQTY FQty
                            ,D.FNumber FDeptType
+                           ,A.FBillNo FBusinessBillNo
                       FROM  YJ_T_CostShareImport A WITH(NOLOCK)
 		                    INNER JOIN YJ_T_CostShareImportEntry B WITH(NOLOCK)
 		                    ON A.FID = B.FID
@@ -787,7 +900,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        AND  A.FDate < '{fTOrg.JTEndTime}'
                        AND  A.FOrgID = {fTOrg.OrgId}
                     ) A
-                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,FDeptType
+                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,FDeptType,FBusinessBillNo
                 ";
                 data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -802,11 +915,131 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     custNum.Weight = Convert.ToDecimal(item["FWeight"]);
                     custNum.Qty = Convert.ToDecimal(item["FQty"]);
                     custNum.DeptType = item["FDeptType"].ToString();
+                    custNum.BusinessBillNo = item["FBusinessBillNo"].ToString();
                     custNumList.Add(custNum);
                 }
             }
 
             #endregion
+
+            if (isDif && custNumList.Count <= 0)
+            {
+                #region 1.从暂估应收获取数量
+                if (fTOrg.OrgId.Contains("100119"))
+                {
+                    sql = $@"
+				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,SUM(FWeight)FWeight,SUM(FQTY)FQTY,FDeptType,FBusinessBillNo
+				  FROM  (
+                    SELECT  A.FSETTLEORGID FOrgID
+                           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
+                           ,A.FCUSTOMERID FCustID
+                           ,B.FMaterialID
+                           ,ISNULL(E.FCostCenterId,'')FCostCenterId
+                           --,ISNULL(F.FXiXiaoType,'') FXiXiaoType
+                           ,B.F_ora_Qty FWeight
+                           ,B.F_ora_Qty1 FQty
+                           ,D.FNumber FDeptType
+                           ,A.FBillNo FBusinessBillNo
+                      FROM  T_AR_RECEIVABLE A WITH(NOLOCK)
+		                    INNER JOIN T_AR_RECEIVABLEENTRY B WITH(NOLOCK)
+		                    ON A.FID = B.FID
+						    INNER JOIN T_AR_RECEIVABLEENTRY_O BO WITH(NOLOCK)
+		                    ON B.FENTRYID = BO.FENTRYID
+                            LEFT JOIN T_AR_RECEIVABLEENTRY_LK BEL WITH(NOLOCK)
+                            ON BEL.FSID = B.FENTRYID AND BEL.FSBILLID = B.FID
+		                    INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+		                    ON A.FSALEDEPTID = C.FDEPTID
+		                    INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+		                    ON C.FDeptProperty = D.FENTRYID 
+                            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
+                            ON C.FDEPTID = E.FRELATION
+                            LEFT JOIN T_BD_MATERIAL F WITH(NOLOCK) --物料
+                            ON B.FMaterialID = F.FMaterialID
+                     WHERE  A.FDOCUMENTSTATUS = 'C'
+                       --AND  D.FNUMBER = 'DP05_SYS' --制造部门 
+                       AND  A.FDate >= '{fTOrg.BeginTime}'
+                       AND  A.FDate < '{fTOrg.EndTime}'
+                       AND  A.FSETTLEORGID = {fTOrg.OrgId}
+                       AND  A.FSetAccountType = 2 --暂估应收
+                       AND  BEL.FSID IS NULL
+                       AND  A.FBillNo NOT LIKE '%-%'
+                    ) A
+                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,FDeptType,FBusinessBillNo
+                ";
+                    data = DBUtils.ExecuteDynamicObject(this.Context, sql);
+
+                    foreach (var item in data)
+                    {
+                        CustNum custNum = new CustNum();
+                        custNum.OrgId = item["FOrgID"].ToString();
+                        custNum.CostCenterId = item["FCostCenterId"].ToString();
+                        custNum.CustID = item["FCustID"].ToString();
+                        custNum.MaterialID = item["FMaterialID"].ToString();
+                        custNum.IsZY = item["FZYDept"].ToString();
+                        custNum.Weight = Convert.ToDecimal(item["FWeight"]);
+                        custNum.Qty = Convert.ToDecimal(item["FQty"]);
+                        custNum.DeptType = item["FDeptType"].ToString();
+                        custNum.BusinessBillNo = item["FBusinessBillNo"].ToString();
+                        custNumList.Add(custNum);
+                    }
+                }
+                #endregion
+
+                #region 1.从成本分摊录入获取数量
+                if (!fTOrg.OrgId.Contains("100119"))
+                {
+                    sql = $@"
+				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,SUM(FWeight)FWeight,SUM(FQTY)FQTY,FDeptType,FBusinessBillNo
+				  FROM  (
+                    SELECT  A.FOrgID FOrgID
+                           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FNumber ELSE '0' END FZYDept
+                           ,B.FCustomerId FCustID
+                           ,B.FMaterialID
+                           ,ISNULL(E.FCostCenterId,'')FCostCenterId
+                          -- ,ISNULL(F.FXiXiaoType,'') FXiXiaoType
+                           ,B.FWEIGHT FWeight
+                           ,B.FQTY FQty
+                           ,D.FNumber FDeptType
+                           ,A.FBillNo FBusinessBillNo
+                      FROM  YJ_T_CostShareImport A WITH(NOLOCK)
+		                    INNER JOIN YJ_T_CostShareImportEntry B WITH(NOLOCK)
+		                    ON A.FID = B.FID
+		                    INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
+		                    ON B.FDEPTID = C.FDEPTID
+		                    INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
+		                    ON C.FDeptProperty = D.FENTRYID 
+                            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
+                            ON C.FDEPTID = E.FRELATION
+                            LEFT JOIN T_BD_MATERIAL F WITH(NOLOCK) --物料
+                            ON B.FMaterialID = F.FMaterialID
+                     WHERE  A.FDOCUMENTSTATUS = 'C'
+                       --AND  D.FNUMBER = 'DP05_SYS' --生产部门
+                       AND  A.FDate >= '{fTOrg.BeginTime}'
+                       AND  A.FDate < '{fTOrg.EndTime}'
+                       AND  A.FOrgID = {fTOrg.OrgId}
+                    ) A
+                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId,FMaterialID,FDeptType,FBusinessBillNo
+                ";
+                    data = DBUtils.ExecuteDynamicObject(this.Context, sql);
+
+                    foreach (var item in data)
+                    {
+                        CustNum custNum = new CustNum();
+                        custNum.OrgId = item["FOrgID"].ToString();
+                        custNum.CostCenterId = item["FCostCenterId"].ToString();
+                        custNum.CustID = item["FCustID"].ToString();
+                        custNum.MaterialID = item["FMaterialID"].ToString();
+                        custNum.IsZY = item["FZYDept"].ToString();
+                        custNum.Weight = Convert.ToDecimal(item["FWeight"]);
+                        custNum.Qty = Convert.ToDecimal(item["FQty"]);
+                        custNum.DeptType = item["FDeptType"].ToString();
+                        custNum.BusinessBillNo = item["FBusinessBillNo"].ToString();
+                        custNumList.Add(custNum);
+                    }
+                }
+
+                #endregion
+            }
 
             if (custNumList.Count <= 0)
             {
@@ -818,38 +1051,24 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         {
             detailCostList.Clear();
 
-            //获取驻点部门的客户列表
-            List<string> zdCustList = costList.Where(x => x.DeptType == "DP07_SYS").Select(x => x.CustByDept).ToList();
-            if (zdCustList == null)
-            {
-                zdCustList = new List<string>();
-            }
-
             foreach (var cost in costList.Where(x => x.OrgId == fTOrg.OrgId))
             {
-                //Logger.Error("",JsonConvert.SerializeObject(cost),null);
-
                 List<CustNum> custNums = new List<CustNum>();
-                //制造部门
-                if (cost.DeptType == "DP05_SYS")
-                {
-                    if (cost.IsZY.Equals("0"))
-                    {
-                        custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.DeptType == cost.DeptType).ToList();
-                        
-                    }
-                    else
-                    {
-                        custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.IsZY == cost.IsZY && x.DeptType == cost.DeptType).ToList();
-                    }
-                    
-                }
 
+                //制造部门 非独立核算
+                if (cost.DeptType == "DP05_SYS" && cost.IsZY.Equals("0"))
+                {
+                    custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.DeptType == cost.DeptType).ToList();
+                }
+                //制造部门 独立核算
+                if (cost.DeptType == "DP05_SYS" && !cost.IsZY.Equals("0"))
+                {
+                    custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.IsZY == cost.IsZY && x.DeptType == cost.DeptType).ToList();
+                }
                 //驻点部门
                 if (cost.DeptType == "DP07_SYS")
                 {
-                    custNums = custNumList.Where(
-                    x => x.OrgId == cost.OrgId && x.CustID == cost.CustByDept).ToList();
+                    custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.CustID == cost.CustByDept).ToList();
                 }
 
                 if (custNums.Count <= 0)
@@ -857,9 +1076,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                     continue;
                 }
 
+                if (cost.ExpGroup.Equals("ZZ01") || cost.ExpGroup.Equals("ZZ24"))
+                {
+                    cost.FTByQty = true;
+                }
+
                 //人工费按照件数分配
                 //非人工费按照吨数分配
-                decimal sumQty = cost.ExpNo.Contains("ZZ01")? custNums.Sum(x => x.Qty): custNums.Sum(x => x.Weight);
+                decimal sumQty = cost.FTByQty ? custNums.Sum(x => x.Qty) : custNums.Sum(x => x.Weight);
                 decimal sharyAmount = 0;
                 decimal sumSharyAmount = 0;
 
@@ -869,7 +1093,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 {
                     if (count != custNums.Count - 1)
                     {
-                        sharyAmount = Math.Round(cost.Amount * ((cost.ExpNo.Contains("ZZ01") ? custNum.Qty : custNum.Weight) / sumQty) ,2);
+                        sharyAmount = Math.Round(cost.Amount * ((cost.FTByQty ? custNum.Qty : custNum.Weight) / sumQty), 2);
                     }
                     else
                     {
@@ -885,7 +1109,12 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                         MaterialID = custNum.MaterialID,
                         ExpID = cost.ExpID,
                         ExpNo = cost.ExpNo,
-                        Amount = sharyAmount
+                        Amount = sharyAmount,
+                        DeptID = cost.DeptID,
+                        BusinessBillNo = custNum.BusinessBillNo,
+                        Weight = custNum.Weight,
+                        Qty = custNum.Qty
+                        
                     };
 
                     sumSharyAmount = sumSharyAmount + sharyAmount;
@@ -894,11 +1123,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
                     count++;
                 }
-                
+
             }
         }
 
-        void CreateCostShare(FTOrg fTOrg,string billType = "CBFT1")
+        void CreateCostShare(FTOrg fTOrg, string billType = "CBFT1")
         {
             // 构建一个IBillView实例，通过此实例，可以方便的填写物料各属性
             IBillView billView = this.CreateBillView();
@@ -921,7 +1150,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         /// 把物料的各属性，填写到IBillView当前所管理的物料中
         /// </summary>
         /// <param name="billView"></param>
-        private void FillBillPropertysByCostShare(IBillView billView, FTOrg fTOrg,string billType)
+        private void FillBillPropertysByCostShare(IBillView billView, FTOrg fTOrg, string billType)
         {
             int index = 0;
 
@@ -939,13 +1168,17 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
             //分摊明细单据体
             billView.Model.BatchCreateNewEntryRow("FEntity", detailCostList.Count);
-            foreach (var detailCost in detailCostList.OrderByDescending(x=>x.CustID))
+            foreach (var detailCost in detailCostList.OrderByDescending(x => x.CustID))
             {
                 dynamicFormView.SetItemValueByID("FCustomerId", detailCost.CustID, index);
                 dynamicFormView.SetItemValueByID("FCostCenter", detailCost.CostCenterId, index);
                 dynamicFormView.SetItemValueByID("FExpense", detailCost.ExpID, index);
                 dynamicFormView.SetItemValueByID("FMaterialId", detailCost.MaterialID, index);
+                dynamicFormView.SetItemValueByID("FEntryDeptID", detailCost.DeptID, index);
+                dynamicFormView.UpdateValue("FBusinessBillNo", index, detailCost.BusinessBillNo);
                 dynamicFormView.UpdateValue("FAmount", index, detailCost.Amount);
+                dynamicFormView.UpdateValue("FWeight", index, detailCost.Weight);
+                dynamicFormView.UpdateValue("FQty", index, detailCost.Qty);
 
                 index++;
             }
@@ -957,346 +1190,15 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             {
                 dynamicFormView.SetItemValueByID("FDeptID", deptCost.DeptID, index);
                 dynamicFormView.SetItemValueByID("FExpenseID", deptCost.ExpID, index);
+                dynamicFormView.SetItemValueByID("FSumCustID", deptCost.CustByDept, index);
+                dynamicFormView.UpdateValue("FSumContactUnitType", index, deptCost.ContactUnitType);
+                dynamicFormView.SetItemValueByID("FSumContactUnit", deptCost.ContactUnit, index);
+                dynamicFormView.SetItemValueByID("FSumProgramID", deptCost.ProgramID, index);
                 dynamicFormView.UpdateValue("FExpAmount", index, deptCost.Amount);
 
                 index++;
             }
         }
-        #endregion
-
-        #region 差额分摊
-        private void DifFT(FTOrg fTOrg)
-        {
-            string billType = "CBFT2";
-
-            //获取需要计提的差额期间
-            GetDifOrg(fTOrg);
-
-            foreach (var difOrg in difOrgList)
-            {
-                //获取总差额
-                deptCostList.Clear();
-                costList.Clear();
-                GetDifShareData(difOrg);
-
-                //获取数量
-                custNumList.Clear();
-                GetNum(difOrg);
-
-                //总成本分摊到客户产品
-                FTDetailCost(difOrg);
-                //创建成本分摊单
-                CreateCostShare(difOrg, billType);
-            }  
-        }
-        void GetDifOrg(FTOrg fTOrg)
-        {
-            deptCostList.Clear();
-            costList.Clear();
-            difOrgList.Clear();
-            DynamicObjectCollection data = null;
-            string sql = $@"
-                SELECT  DISTINCT YEAR(A.FJTDate) FYEAR,MONTH(A.FJTDate) FPeriod
-                  FROM  t_ER_ExpenseReimb A
-                        INNER JOIN t_ER_ExpenseReimbEntry B
-                        ON A.FID = B.FID
-                        INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-	                    ON B.FExpenseDeptEntryID = C.FDEPTID
-		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		                ON C.FDeptProperty = D.FENTRYID 
-                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                        ON C.FDEPTID = E.FRELATION
-                 WHERE  A.FDate >= '{fTOrg.BeginTime}'
-                   AND  A.FDate < '{fTOrg.EndTime}'
-                   AND  A.FDocumentStatus = 'C'
-                   AND  D.FNUMBER = 'DP05_SYS' --生产部门 
-                   AND  A.FOrgID = {fTOrg.OrgId}
-                   AND  YEAR(A.FJTDate) <> 0
-                ";
-
-            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-            foreach (var item in data)
-            {
-                FTOrg difOrg = new FTOrg();
-
-                difOrg.OrgId = fTOrg.OrgId;
-                difOrg.AcctPolicy = fTOrg.AcctPolicy;
-                difOrg.Year = fTOrg.Year;
-                difOrg.Period = fTOrg.Period;
-
-                difOrg.BeginTime = fTOrg.BeginTime;
-                difOrg.EndTime = fTOrg.EndTime;
-
-                difOrg.JTYear = item["FYEAR"].ToString();
-                difOrg.JTPeriod = item["FPeriod"].ToString();
-                difOrg.JTBeginTime = $@"{difOrg.JTYear}-{difOrg.JTPeriod}-01";
-                difOrg.JTEndTime = Convert.ToDateTime(difOrg.JTBeginTime).AddMonths(1).ToString("yyyy-MM-dd");
-                difOrgList.Add(difOrg);
-            }
-
-            
-            if (difOrgList.Count <= 0)
-            {
-                throw new Exception("未获取到对应期间的总成本!");
-            }
-        }
-
-        private void GetDifShareData(FTOrg fTOrg)
-        {
-            DynamicObjectCollection data = null;
-            string sql = $@"
-                SELECT  A.FOrgID FOrgID
-                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-                       ,B.FExpID
-                       ,BE.FNumber FExpNo
-                       ,ISNULL(E.FCostCenterID,0) FCostCenterID
-                       ,SUM(B.FDifAmount) FAmount
-                       ,C.FDEPTID
-                       ,D.FNUMBER FDeptType
-                       ,B.F_PDLJ_Base FCustByDept
-                  FROM  t_ER_ExpenseReimb A
-                        INNER JOIN t_ER_ExpenseReimbEntry B
-                        ON A.FID = B.FID
-		                INNER JOIN T_BD_Expense BE WITH(NOLOCK)
-		                ON B.FExpID = BE.FExpID
-                        INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-	                    ON B.FExpenseDeptEntryID = C.FDEPTID
-		                INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		                ON C.FDeptProperty = D.FENTRYID 
-                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                        ON C.FDEPTID = E.FRELATION
-                 WHERE  A.FJTDate >= '{fTOrg.JTBeginTime}'
-                   AND  A.FJTDate < '{fTOrg.JTEndTime}'
-                   AND  A.FDocumentStatus = 'C'
-                   AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
-                   AND  A.FOrgID = {fTOrg.OrgId}
-                   AND  B.FDifAmount <> 0
-                 GROUP  BY A.FOrgID,C.F_ora_Assistant,C.FDEPTID,B.FExpID,E.FCostCenterID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base --专用车间,费用项目
-                ";
-
-            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-            foreach (var item in data)
-            {
-                Cost cost = new Cost();
-                cost.OrgId = item["FOrgID"].ToString();
-                cost.CostCenterId = item["FCostCenterID"].ToString();
-                cost.IsZY = item["FZYDept"].ToString();
-                cost.DeptID = item["FDEPTID"].ToString();
-                cost.DeptType = item["FDeptType"].ToString();
-                cost.CustByDept = item["FCustByDept"].ToString();
-                cost.ExpID = item["FExpID"].ToString();
-                cost.ExpNo = item["FExpNo"].ToString();
-                cost.Amount = Convert.ToDecimal(item["FAmount"]);
-                deptCostList.Add(cost);
-            }
-
-            foreach (var deptCost in deptCostList)
-            {
-                Cost cost = costList.Where(x => x.OrgId == deptCost.OrgId
-                                             && x.CostCenterId == deptCost.CostCenterId
-                                             && x.IsZY == deptCost.IsZY
-                                             && x.ExpID == deptCost.ExpID
-                                             && x.DeptType == deptCost.DeptType
-                                             && x.CustByDept == deptCost.CustByDept
-                ).FirstOrDefault();
-
-                if (cost == null)
-                {
-                    costList.Add(new Cost()
-                    {
-                        OrgId = deptCost.OrgId,
-                        CostCenterId = deptCost.CostCenterId,
-                        IsZY = deptCost.IsZY,
-                        ExpID = deptCost.ExpID,
-                        ExpNo =deptCost.ExpNo,
-                        DeptType = deptCost.DeptType,
-                        CustByDept = deptCost.CustByDept,
-                        Amount = deptCost.Amount
-                    });
-                }
-                else
-                {
-                    cost.Amount = cost.Amount + deptCost.Amount;
-                }
-            }
-
-            if (costList.Count <= 0)
-            {
-                throw new Exception($"未获取到对应期间【{fTOrg.JTYear}-{fTOrg.JTPeriod}】的总成本!");
-            }
-        }
-
-        private void GetDifNum(FTOrg fTOrg)
-        {
-            //1.如果组织是伊莱亚，数量从销售订单中获取
-            //2.如果组织不是伊莱亚，数量从分摊录入中获取
-
-            string sql = "";
-            DynamicObjectCollection data = null;
-
-            #region 1.从销售订单获取数量
-    //        if (fTOrg.OrgId.Contains("100119"))
-    //        {
-    //            sql = $@"
-				//SELECT FOrgID,FZYDept,FCustID,FCostCenterId,SUM(FWeight)FWeight,SUM(FQTY)FQTY
-				//  FROM  (
-    //                SELECT  A.FSaleOrgId FOrgID
-    //                       ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FNumber ELSE '0' END FZYDept
-    //                       ,A.FCustID
-    //                       ,B.FMaterialID
-    //                       ,ISNULL(E.FCostCenterId,'')FCostCenterId
-    //                       ,B.F_ora_Qty FWeight
-    //                       ,B.F_ora_Qty1 FQty
-    //                  FROM  T_SAL_ORDER A WITH(NOLOCK)
-		  //                  INNER JOIN T_SAL_ORDEREntry B WITH(NOLOCK)
-		  //                  ON A.FID = B.FID
-		  //                  INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-		  //                  ON A.FSALEDEPTID = C.FDEPTID
-		  //                  INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		  //                  ON C.FDeptProperty = D.FENTRYID 
-    //                        LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-    //                        ON C.FDEPTID = E.FRELATION
-    //                 WHERE  A.FDOCUMENTSTATUS = 'C'
-    //                   --AND  D.FNUMBER = 'DP01_SYS' --生产部门 
-    //                   AND  A.FDate >= DATEADD(M,-1,'{fTOrg.BeginTime}')
-    //                   AND  A.FDate < DATEADD(M,-1,'{fTOrg.EndTime}')
-    //                   AND  A.FSaleOrgId = {fTOrg.OrgId}
-    //                ) A
-    //             GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId
-    //            ";
-    //            data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-    //            foreach (var item in data)
-    //            {
-    //                CustNum custNum = new CustNum();
-    //                custNum.OrgId = item["FOrgID"].ToString();
-    //                custNum.CostCenterId = item["FCostCenterId"].ToString();
-    //                custNum.CustID = item["FCustID"].ToString();
-    //                //custNum.MaterialID = item["FMaterialID"].ToString();
-    //                custNum.IsZY = item["FZYDept"].ToString();
-    //                custNum.Weight = Convert.ToDecimal(item["FWeight"]);
-    //                custNum.Qty = Convert.ToDecimal(item["FQty"]);
-    //                custNumList.Add(custNum);
-    //            }
-    //        }
-            #endregion
-
-            #region 1.从暂估应收获取数量
-            if (fTOrg.OrgId.Contains("100119"))
-            {
-                sql = $@"
-				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,SUM(FWeight)FWeight,SUM(FQTY)FQTY
-				  FROM  (
-                    SELECT  A.FSETTLEORGID FOrgID
-                           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
-                           ,A.FCUSTOMERID FCustID
-                           ,B.FMaterialID
-                           ,ISNULL(E.FCostCenterId,'')FCostCenterId
-                           --,ISNULL(F.FXiXiaoType,'') FXiXiaoType
-                           ,B.F_ora_Qty FWeight
-                           ,B.F_ora_Qty1 FQty
-                      FROM  T_AR_RECEIVABLE A WITH(NOLOCK)
-		                    INNER JOIN T_AR_RECEIVABLEENTRY B WITH(NOLOCK)
-		                    ON A.FID = B.FID
-						    INNER JOIN T_AR_RECEIVABLEENTRY_O BO WITH(NOLOCK)
-		                    ON B.FENTRYID = BO.FENTRYID
-                            LEFT JOIN T_AR_RECEIVABLEENTRY_LK BEL WITH(NOLOCK)
-                            ON BEL.FSID = B.FENTRYID AND BEL.FSBILLID = B.FID
-		                    INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-		                    ON A.FSALEDEPTID = C.FDEPTID
-		                    INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		                    ON C.FDeptProperty = D.FENTRYID 
-                            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                            ON C.FDEPTID = E.FRELATION
-                            LEFT JOIN T_BD_MATERIAL F WITH(NOLOCK) --物料
-                            ON B.FMaterialID = F.FMaterialID
-                     WHERE  A.FDOCUMENTSTATUS = 'C'
-                       --AND  D.FNUMBER = 'DP01_SYS' --生产部门 
-                       AND  A.FDate >= DATEADD(M,-1,'{fTOrg.JTBeginTime}')
-                       AND  A.FDate < DATEADD(M,-1,'{fTOrg.JTEndTime}')
-                       AND  A.FSETTLEORGID = {fTOrg.OrgId}
-                       AND  A.FSetAccountType = 2 --暂估应收
-                       AND  BEL.FSID IS NULL
-                       AND  A.FBillNo NOT LIKE '%-%'
-                    ) A
-                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId
-                ";
-                data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-                foreach (var item in data)
-                {
-                    CustNum custNum = new CustNum();
-                    custNum.OrgId = item["FOrgID"].ToString();
-                    custNum.CostCenterId = item["FCostCenterId"].ToString();
-                    custNum.CustID = item["FCustID"].ToString();
-                    //custNum.XiXiaoType = item["FXiXiaoType"].ToString();
-                    custNum.IsZY = item["FZYDept"].ToString();
-                    custNum.Weight = Convert.ToDecimal(item["FWeight"]);
-                    custNum.Qty = Convert.ToDecimal(item["FQty"]);
-                    custNumList.Add(custNum);
-                }
-            }
-            #endregion
-
-            #region 1.从成本分摊录入获取数量
-            if (!fTOrg.OrgId.Contains("100119"))
-            {
-                sql = $@"
-				SELECT FOrgID,FZYDept,FCustID,FCostCenterId,SUM(FWeight)FWeight,SUM(FQTY)FQTY
-				  FROM  (
-                    SELECT  A.FOrgID FOrgID
-                           ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FNumber ELSE '0' END FZYDept
-                           ,B.FCustomerId FCustID
-                           ,B.FMaterialID
-                           ,ISNULL(E.FCostCenterId,'')FCostCenterId
-                          -- ,ISNULL(F.FXiXiaoType,'') FXiXiaoType
-                           ,B.FWEIGHT FWeight
-                           ,B.FQTY FQty
-                      FROM  YJ_T_CostShareImport A WITH(NOLOCK)
-		                    INNER JOIN YJ_T_CostShareImportEntry B WITH(NOLOCK)
-		                    ON A.FID = B.FID
-		                    INNER JOIN T_BD_DEPARTMENT C WITH(NOLOCK) --部门
-		                    ON A.FDEPTID = C.FDEPTID
-		                    INNER JOIN T_BAS_ASSISTANTDATAENTRY D WITH(NOLOCK) --部门属性
-		                    ON C.FDeptProperty = D.FENTRYID 
-                            LEFT JOIN T_CB_COSTCENTER E WITH(NOLOCK) --成本中心
-                            ON C.FDEPTID = E.FRELATION
-                            LEFT JOIN T_BD_MATERIAL F WITH(NOLOCK) --物料
-                            ON B.FMaterialID = F.FMaterialID
-                     WHERE  A.FDOCUMENTSTATUS = 'C'
-                       --AND  D.FNUMBER = 'DP01_SYS' --生产部门 
-                       AND  A.FDate >= DATEADD(M,-1,'{fTOrg.JTBeginTime}')
-                       AND  A.FDate < DATEADD(M,-1,'{fTOrg.JTEndTime}')
-                       AND  A.FOrgID = {fTOrg.OrgId}
-                    ) A
-                 GROUP  BY FOrgID,FZYDept,FCustID,FCostCenterId
-                ";
-                data = DBUtils.ExecuteDynamicObject(this.Context, sql);
-
-                foreach (var item in data)
-                {
-                    CustNum custNum = new CustNum();
-                    custNum.OrgId = item["FOrgID"].ToString();
-                    custNum.CostCenterId = item["FCostCenterId"].ToString();
-                    custNum.CustID = item["FCustID"].ToString();
-                    //custNum.XiXiaoType = item["FXiXiaoType"].ToString();
-                    custNum.IsZY = item["FZYDept"].ToString();
-                    custNum.Weight = Convert.ToDecimal(item["FWeight"]);
-                    custNum.Qty = Convert.ToDecimal(item["FQty"]);
-                    custNumList.Add(custNum);
-                }
-            }
-
-            #endregion
-
-            if (custNumList.Count <= 0)
-            {
-                throw new Exception($"未获取到对应期间【{fTOrg.JTYear}-{fTOrg.JTPeriod}】的总重量或件数!");
-            }
-        }
-        #endregion
 
         /// <summary>
         /// 获取需要进行分摊的组织和期间
@@ -1389,9 +1291,8 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             this.View.UpdateView("FResultEntity");
         }
 
-   
         /// <summary>
-        /// 保存物料，并显示保存结果
+        /// 保存操作，并显示保存结果
         /// </summary>
         /// <param name="billView"></param>
         /// <param name="saveOption"></param>
@@ -1442,6 +1343,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             return new ShareResult { Org = fTOrg, Status = status, Message = message };
            
         }
+
+        /// <summary>
+        /// 创建单据视图
+        /// </summary>
+        /// <returns></returns>
         private IBillView CreateBillView()
         {
             // 读取物料的元数据
@@ -1509,19 +1415,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             // 返回
             return openParam;
         }
-        /// <summary>
-        /// 加载指定的单据进行修改
-        /// </summary>
-        /// <param name="billView"></param>
-        /// <param name="pkValue"></param>
-        private void ModifyBill(IBillView billView, string pkValue)
-        {
-            billView.OpenParameter.Status = OperationStatus.EDIT;
-            billView.OpenParameter.CreateFrom = CreateFrom.Default;
-            billView.OpenParameter.PkValue = pkValue;
-            billView.OpenParameter.DefaultBillTypeId = string.Empty;
-            ((IDynamicFormViewService)billView).LoadData();
-        }
+
     }
 
     //需要分摊的组织
@@ -1578,6 +1472,16 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         public string DeptType { get; set; }
 
         /// <summary>
+        /// 费用分组
+        /// </summary>
+        public string ExpGroup { get; set; } = "";
+
+        /// <summary>
+        /// 按件数分摊
+        /// </summary>
+        public bool FTByQty { get; set; } = false;
+
+        /// <summary>
         /// 驻点部门对应客户
         /// </summary>
         public string CustByDept { get; set; } = "";
@@ -1586,6 +1490,21 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         /// 费用项目
         /// </summary>
         public string ExpID { get; set; }
+
+        /// <summary>
+        /// 往来单位类型
+        /// </summary>
+        public string ContactUnitType { get; set; } = "";
+
+        /// <summary>
+        /// 往来单位
+        /// </summary>
+        public string ContactUnit { get; set; } = "0";
+
+        /// <summary>
+        /// 项目号
+        /// </summary>
+        public string ProgramID { get; set; } = "0";
 
         public string ExpNo { get; set; }
 
@@ -1622,6 +1541,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         public decimal Weight { get; set; }
 
         public decimal Qty { get; set; }
+
+        /// <summary>
+        /// 业务单号
+        /// </summary>
+        public string BusinessBillNo { get; set; }
     }
 
     //每个组织每个费用项目每个成本中心每个客户每个产品的成本
@@ -1647,6 +1571,23 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         public string XiXiaoType { get; set; }
 
         public decimal Amount { get; set; }
+
+        public string DeptID { get; set; }
+
+        /// <summary>
+        /// 业务单号
+        /// </summary>
+        public string BusinessBillNo { get; set; }
+
+        /// <summary>
+        /// 吨数
+        /// </summary>
+        public decimal Weight { get; set; }
+
+        /// <summary>
+        /// 件数
+        /// </summary>
+        public decimal Qty { get; set; }
     }
 
     public class ShareResult
