@@ -450,7 +450,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                    AND  A.FExpenseOrgId = {fTOrg.OrgId}
                    AND  ISNULL(A.FBXBillNo,'') = '' --未下推费用报销单
                    AND  A.FBillNo NOT LIKE '%-%'
-                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,,B.F_ora_Base
+                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
