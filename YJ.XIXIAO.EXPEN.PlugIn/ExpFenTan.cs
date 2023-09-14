@@ -239,7 +239,8 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
             #region 1.获取其他出库的金额
             sql = $@"
-                SELECT  A.FStockOrgId FOrgID
+                SELECT  A.FBillNo
+                       ,A.FStockOrgId FOrgID
                        ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
                        ,AT.FNUMBER FBillType
                        ,BMG.FNUMBER FMaterialGroup
@@ -264,7 +265,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                    AND  A.FDate >= '{fTOrg.BeginTime}'
                    AND  A.FDate < '{fTOrg.EndTime}'
                    AND  A.FStockOrgId = {fTOrg.OrgId}
-                 GROUP  BY A.FStockOrgId,C.F_ora_Assistant,C.FDEPTID,AT.FNUMBER,BMG.FNUMBER,D.FNUMBER --专用车间,费用项目
+                 GROUP  BY A.FStockOrgId,C.F_ora_Assistant,C.FDEPTID,AT.FNUMBER,BMG.FNUMBER,D.FNUMBER,A.FBillNo
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
@@ -291,6 +292,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             foreach (var item in data)
             {
                 Cost cost = new Cost();
+                cost.BillNo = item["FBillNo"].ToString();
                 cost.OrgId = item["FOrgID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
@@ -370,7 +372,8 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
             #region 3.获取折旧调整单的金额
             sql = $@"
-                SELECT  A.FOWNERORGID FOrgID
+                SELECT  A.FBillNo
+                       ,A.FOWNERORGID FOrgID
                        ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
                        ,BD.FCostItemID FExpID
                        ,BE.FNumber FExpNo
@@ -398,13 +401,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                    AND  A.FTransDate < '{fTOrg.EndTime}'
                    AND  A.FOWNERORGID = {fTOrg.OrgId}
                    --AND  BE.FNumber IN ('FYXM08_SYS') --折旧费用
-                 GROUP  BY A.FOWNERORGID,C.F_ora_Assistant,C.FDEPTID,BD.FCostItemID,BE.FNumber,D.FNUMBER,BD.F_PDLJ_Base,DPG.FNUMBER --专用车间,费用项目
+                 GROUP  BY A.FOWNERORGID,C.F_ora_Assistant,C.FDEPTID,BD.FCostItemID,BE.FNumber,D.FNUMBER,BD.F_PDLJ_Base,DPG.FNUMBER,A.FBillNo
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
             foreach (var item in data)
             {
                 Cost cost = new Cost();
+                cost.BillNo = item["FBillNo"].ToString();
                 cost.OrgId = item["FOrgID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
@@ -432,6 +436,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        ,A.FContactUnitType
                        ,A.FContactUnit
                        ,B.F_ora_Base FProgramID
+                       ,A.FBillNo
                   FROM  t_ER_ExpenseJt A WITH(NOLOCK)
 		                INNER JOIN t_ER_ExpenseJtEntry B WITH(NOLOCK)
 		                ON A.FID = B.FID
@@ -450,13 +455,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                    AND  A.FExpenseOrgId = {fTOrg.OrgId}
                    AND  ISNULL(A.FBXBillNo,'') = '' --未下推费用报销单
                    AND  A.FBillNo NOT LIKE '%-%'
-                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base
+                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base,A.FBillNo
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
             foreach (var item in data)
             {
                 Cost cost = new Cost();
+                cost.BillNo = item["FBillNo"].ToString();
                 cost.OrgId = item["FOrgID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
@@ -475,7 +481,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
 
             #region 5.获取费用报销单的金额
             sql = $@"
-                SELECT FOrgID,FZYDept,FExpID,FExpNo,FDEPTID,FDeptType,FCustByDept,FExpGroup,FContactUnitType,FContactUnit,FProgramID,SUM(FAmount)FAmount
+                SELECT FOrgID,FZYDept,FExpID,FExpNo,FDEPTID,FDeptType,FCustByDept,FExpGroup,FContactUnitType,FContactUnit,FProgramID,SUM(FAmount)FAmount,FBillNo
                   FROM  (
                     SELECT  A.FOrgID FOrgID
                            ,CASE WHEN ISNULL(C.F_ora_Assistant,'') = '647588a1d3effb' THEN C.FDEPTID ELSE '0' END FZYDept
@@ -489,6 +495,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                            ,A.FContactUnitType
                            ,A.FContactUnit
                            ,B.F_ora_Base FProgramID
+                           ,A.FBillNo
                       FROM  T_ER_EXPENSEREIMB A WITH(NOLOCK)
 						    INNER JOIN T_ER_EXPENSEREIMBENTRY B WITH(NOLOCK)
 						    ON A.FID = B.FID 
@@ -507,13 +514,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        AND  A.FOrgID = {fTOrg.OrgId}
                        AND  (A.FJTDate IS NULL OR (A.FJTDate IS NOT NULL AND YEAR(A.FDate) = YEAR(A.FJTDate) AND MONTH(A.FDate) = MONTH(A.FJTDate)))--计提日期为空
                    ) A                 
-                GROUP  BY FOrgID,FZYDept,FExpID,FExpNo,FDEPTID,FDeptType,FCustByDept,FExpGroup,FContactUnitType,FContactUnit,FProgramID
+                GROUP  BY FOrgID,FZYDept,FExpID,FExpNo,FDEPTID,FDeptType,FCustByDept,FExpGroup,FContactUnitType,FContactUnit,FProgramID,FBillNo
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
             foreach (var item in data)
             {
                 Cost cost = new Cost();
+                cost.BillNo = item["FBillNo"].ToString();
                 cost.OrgId = item["FOrgID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
@@ -592,6 +600,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        ,A.FContactUnitType
                        ,A.FContactUnit
                        ,B.F_ora_Base FProgramID
+                       ,A.FBillNo
                   FROM  t_ER_ExpenseReimb A WITH(NOLOCK)
                         INNER JOIN t_ER_ExpenseReimbEntry B WITH(NOLOCK)
                         ON A.FID = B.FID
@@ -609,7 +618,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                    AND  D.FNUMBER IN ('DP05_SYS','DP07_SYS') --制造部门,驻点部门 
                    AND  A.FOrgID = {fTOrg.OrgId}
                    AND  B.FDifAmount <> 0
-                 GROUP  BY A.FOrgID,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base 
+                 GROUP  BY A.FOrgID,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base,A.FBillNo
                 ";
 
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
@@ -647,6 +656,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                        ,A.FContactUnitType
                        ,A.FContactUnit
                        ,B.F_ora_Base FProgramID
+                       ,A.FBillNo
                   FROM  t_ER_ExpenseJt A WITH(NOLOCK)
 		                INNER JOIN t_ER_ExpenseJtEntry B WITH(NOLOCK)
 		                ON A.FID = B.FID
@@ -671,13 +681,14 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                    AND  A.FExpenseOrgId = {fTOrg.OrgId}
                    AND  ISNULL(A.FBXBillNo,'') <> '' --费用报销单号不为空
                    AND  T1.FExpID IS NULL
-                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base 
+                 GROUP  BY A.FExpenseOrgId,C.F_ora_Assistant,C.FDEPTID,B.FExpID,BE.FNumber,D.FNUMBER,B.F_PDLJ_Base,DPG.FNUMBER,A.FContactUnitType,A.FContactUnit,B.F_ora_Base,A.FBillNo
                 ";
             data = DBUtils.ExecuteDynamicObject(this.Context, sql);
 
             foreach (var item in data)
             {
                 Cost cost = new Cost();
+                cost.BillNo = item["FBillNo"].ToString();
                 cost.OrgId = item["FOrgID"].ToString();
                 cost.IsZY = item["FZYDept"].ToString();
                 cost.DeptID = item["FDEPTID"].ToString();
@@ -1068,7 +1079,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 //驻点部门
                 if (cost.DeptType == "DP07_SYS")
                 {
-                    custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.CustID == cost.CustByDept).ToList();
+                    custNums = custNumList.Where(x => x.OrgId == cost.OrgId && x.CustID == cost.CustByDept && x.DeptType == cost.DeptType).ToList();
                 }
 
                 if (custNums.Count <= 0)
@@ -1113,8 +1124,8 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                         DeptID = cost.DeptID,
                         BusinessBillNo = custNum.BusinessBillNo,
                         Weight = custNum.Weight,
-                        Qty = custNum.Qty
-                        
+                        Qty = custNum.Qty,
+                        ProgramID = cost.ProgramID
                     };
 
                     sumSharyAmount = sumSharyAmount + sharyAmount;
@@ -1175,6 +1186,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
                 dynamicFormView.SetItemValueByID("FExpense", detailCost.ExpID, index);
                 dynamicFormView.SetItemValueByID("FMaterialId", detailCost.MaterialID, index);
                 dynamicFormView.SetItemValueByID("FEntryDeptID", detailCost.DeptID, index);
+                dynamicFormView.SetItemValueByID("FProgramID", detailCost.ProgramID, index);
                 dynamicFormView.UpdateValue("FBusinessBillNo", index, detailCost.BusinessBillNo);
                 dynamicFormView.UpdateValue("FAmount", index, detailCost.Amount);
                 dynamicFormView.UpdateValue("FWeight", index, detailCost.Weight);
@@ -1188,6 +1200,7 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
             billView.Model.BatchCreateNewEntryRow("FSumAmountEntry", deptCostList.Count);
             foreach (var deptCost in deptCostList.OrderByDescending(x => x.DeptID))
             {
+                dynamicFormView.UpdateValue("FSourceBillNo", index,deptCost.BillNo);
                 dynamicFormView.SetItemValueByID("FDeptID", deptCost.DeptID, index);
                 dynamicFormView.SetItemValueByID("FExpenseID", deptCost.ExpID, index);
                 dynamicFormView.SetItemValueByID("FSumCustID", deptCost.CustByDept, index);
@@ -1512,7 +1525,9 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         /// 金额
         /// </summary>
         public decimal Amount = 0;
-    }
+
+        public string BillNo  { get; set; }
+}
 
     //每个客户每个产品的数量
     public class CustNum
@@ -1588,6 +1603,11 @@ namespace YJ.XIXIAO.EXPEN.PlugIn
         /// 件数
         /// </summary>
         public decimal Qty { get; set; }
+
+        /// <summary>
+        /// 项目号
+        /// </summary>
+        public string ProgramID { get; set; } = "0";
     }
 
     public class ShareResult
